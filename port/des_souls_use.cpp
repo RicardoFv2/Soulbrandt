@@ -52,6 +52,9 @@ extern "C" PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
 #endif
 extern "C" void ppu_register_function(uint64_t addr, void (*fn)(ppu_context*));
 extern "C" void ds_malloc(ppu_context* ctx);   /* des_heap.cpp: the guest heap */
+extern "C" int des_storage_command(ppu_context* ctx);   /* des_storage.cpp: Send to Storage, else 0 */
+
+extern "C" int des_storage_inventory_message(ppu_context* ctx);
 
 namespace {
 
@@ -329,6 +332,7 @@ bool offer(ppu_context* ctx, uint32_t dlg, uint32_t mode)
 
 void cmd_choice(ppu_context* ctx)   /* for 0x0081E110 */
 {
+    if (des_storage_command(ctx)) return;
     const uint32_t cmd = (uint32_t)ctx->gpr[3];
     if (on() && vm_read32(cmd + kCmdRow) == 0 && vm_read8(cmd + kCmdUseOff) == 0) {
         const uint32_t menus = vm_read32(DES_AT(0x019ADF0Cu));
@@ -342,6 +346,7 @@ void cmd_choice(ppu_context* ctx)   /* for 0x0081E110 */
 
 void inv_message(ppu_context* ctx)   /* for 0x008219E0 */
 {
+    if (des_storage_inventory_message(ctx)) return;
     const uint32_t dlg = (uint32_t)ctx->gpr[3];
     const int32_t msg = (int32_t)ctx->gpr[4];
     if (logging()) log_rows(dlg, msg);

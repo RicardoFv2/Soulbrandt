@@ -760,11 +760,21 @@ void dialog_draw_inner(ppu_context* ctx)
 }
 
 extern "C" void des_mm_draw_enter(ppu_context* ctx, uint32_t dlg);   /* des_menu_mouse.cpp */
+extern "C" void des_storage_on_draw(ppu_context* ctx, uint32_t dlg);  /* des_storage.cpp */
+
+extern "C" void des_storage_draw_end();
 
 void dialog_draw(ppu_context* ctx)   /* for 0x00F60BD0; the menus' mouse sees each dialog drawn too */
 {
+    des_storage_on_draw(ctx, (uint32_t)ctx->gpr[3]);
     des_mm_draw_enter(ctx, (uint32_t)ctx->gpr[3]);
     dialog_draw_inner(ctx);
+    while (g_trampoline_fn) {
+        void (*tf)(void*) = g_trampoline_fn;
+        g_trampoline_fn = nullptr;
+        tf(ctx);
+    }
+    des_storage_draw_end();
 }
 
 /* The text state the drawer's commands play back into: +0x24 in the object at

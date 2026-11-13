@@ -31,6 +31,8 @@ DES_GAME_CALLS(DES_GAME_CALL_DEF_)
 
 namespace {
 struct lift_entry { uint64_t addr; void (*func)(ppu_context*); const char* name; };
+const lift_entry* s_lift = nullptr;   /* the DLL's table, for a call that is not in DES_GAME_CALLS */
+uint64_t s_lift_n = 0;
 
 void (*find_lifted(const lift_entry* t, uint64_t n, uint64_t addr))(ppu_context*)
 {
@@ -66,6 +68,8 @@ constexpr int kGameCalls = 0 DES_GAME_CALLS(DES_GAME_CALL_ONE_);
 extern "C" int ps3_game_title_loaded(const void* func_table, uint64_t count)
 {
     const lift_entry* t = static_cast<const lift_entry*>(func_table);
+    s_lift = t;
+    s_lift_n = count;
     /* The disc whose addresses have every call, the US disc's first. A DLL that
      * fits none is reported and treated as the US disc's. */
     DesRegion r = DesRegion::US;
@@ -92,6 +96,17 @@ extern "C" int ps3_game_title_loaded(const void* func_table, uint64_t count)
     DES_GAME_CALLS(DES_GAME_CALL_RESOLVE_)
 #undef DES_GAME_CALL_RESOLVE_
     return missing;
+}
+
+/* A lifted function by the name in the DLL's table ("func_00924BB8" on the US
+ * disc). Null before the load, or when this disc's lift uses another name.
+ * The table is the DLL's own; it stays for the process. */
+extern "C" void (*des_lift_find(const char* name))(ppu_context*)
+{
+    if (!name || !s_lift) return nullptr;
+    for (uint64_t i = 0; i < s_lift_n; i++)
+        if (s_lift[i].name && std::strcmp(s_lift[i].name, name) == 0) return s_lift[i].func;
+    return nullptr;
 }
 
 /* The game DLL calls this from des_game_init when it was built without the

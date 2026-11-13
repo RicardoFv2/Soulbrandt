@@ -182,6 +182,7 @@ add_executable(des_boot
     "${CMAKE_CURRENT_SOURCE_DIR}/des_chrins.cpp"            # ChrIns worker: done flag before the done event
     "${CMAKE_CURRENT_SOURCE_DIR}/des_guest_exit.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/des_souls_use.cpp"         # DES_SOULS_AT_ONCE: Use several soul items at once
+    "${CMAKE_CURRENT_SOURCE_DIR}/des_storage.cpp"           # DES_STORAGE: Send to Storage from the inventory
     "${CMAKE_CURRENT_SOURCE_DIR}/des_respec.cpp"            # DES_RESPEC: stat respec at the Nexus statue and the Maiden
     "${CMAKE_CURRENT_SOURCE_DIR}/des_luagc.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/des_luaheap.cpp"           # room for Lua when its heap is full
@@ -244,6 +245,7 @@ else()
             "${CMAKE_CURRENT_SOURCE_DIR}/des_chrins.cpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/des_guest_exit.cpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/des_souls_use.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/des_storage.cpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/des_respec.cpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/des_luagc.cpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/des_luaheap.cpp"
