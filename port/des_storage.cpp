@@ -4,10 +4,10 @@
  * grayout_drop00 and grayout_drop01: Use and Drop. With the knob on, a line
  * is added under them, labelled "Send to Storage". Choosing it calls the
  * game's own deposit (the US lift's func_00924BB8): the box at PGD+0x478, the
- * inventory at PGD+0x128, the selected slot, and the whole stack. That
- * function copies into the box first and takes the stack off the player only
- * when the copy lands, and returns 0 without touching the inventory when it
- * refuses (equipped, or the box will not take it). Send greys with Drop's
+ * inventory at PGD+0x128, the selected slot, and the chosen quantity. Its
+ * successful return does not guarantee the whole quantity reached the box:
+ * stack additions can clamp. The picker and the final deposit therefore
+ * check the native storage count and limit first. Send greys with Drop's
  * overlay when the item is equipped or protected; Cross then plays the
  * cancel sound and stays on the command, the same as greyed Drop.
  *
@@ -240,6 +240,31 @@ int32_t selected(uint32_t dlg)
 }
 
 struct Entry { uint32_t cat = 0, id = 0; int32_t count = 0; };
+
+// The native deposit reports success even when its box update clamps a stack,
+// then removes the entire requested quantity. Ask the game's count and limit
+// helpers first; a successful return alone cannot authorize removing items.
+int storage_room(ppu_context* ctx, uint32_t box, const Entry& item)
+{
+#ifdef PS3_GAME_SPLIT
+    static auto count = des_lift_find("func_00924D58");
+    static auto limit = des_lift_find("func_00923FD8");
+    static uint32_t probe = 0;
+    if (!count || !limit || !guest_ok(box, 4)) return 0;
+    // The limit helper reads only the selected record's item key. Give it a
+    // private one-record view rather than changing any live box entry.
+    if (!probe) probe = guest_alloc(ctx, 32);
+    if (!probe) return 0;
+    for (uint32_t i = 0; i < 32; i += 4) storage_write32(probe + i, 0);
+    storage_write32(probe + 12, item.cat | item.id);
+    const int maximum = (int32_t)call_game(ctx, limit, {probe, 0});
+    const int held = (int32_t)call_game(ctx, count, {box, item.cat, item.id});
+    if (maximum <= 0 || held < 0 || held >= maximum) return 0;
+    return maximum - held;
+#else
+    return 0;
+#endif
+}
 
 Entry entry_at(uint32_t p, int32_t idx)
 {
@@ -1198,6 +1223,10 @@ int deposit_inventory(ppu_context* ctx, const InventoryTransfer& pending)
         return 1;
     }
     if (!transferable(ctx, p, idx)) return 1;
+    if (pending.amount > storage_room(ctx, box, e)) {
+        fprintf(stderr, "[des] storage: box has no room for id %u x%d; inventory unchanged\n", e.id, pending.amount);
+        return 1;
+    }
     const uint32_t ok = call_game(ctx, fn, {box, p + kPgdInv, idx, pending.amount});
     const Entry after = entry_at(p, idx);
     if (ok == 1 && (after.id != e.id || after.count != e.count)) {
@@ -1249,6 +1278,12 @@ extern "C" int des_storage_command(ppu_context* ctx)
     if (!p || !dlg || slot < 0 || item.count < 1 || item.count > 9999) return 1;
     if (send_blocked(ctx, s_dlg)) {
         fprintf(stderr, "[des] storage: equipped or protected item stays in inventory (slot %d)\n", slot);
+        call_game(ctx, func_0072D970, {200});
+        return 1;
+    }
+    const uint32_t box = vm_read32(p + kPgdBox);
+    if (storage_room(ctx, box, item) < 1) {
+        fprintf(stderr, "[des] storage: box has no room for id %u; inventory unchanged\n", item.id);
         call_game(ctx, func_0072D970, {200});
         return 1;
     }
@@ -1405,6 +1440,7 @@ void add_detour(ppu_context* ctx)
     for (uint32_t i = 0; i < capacity; i++) before[i] = entry_at(p, (int)i);
     const uint32_t limit_at = stats + kBurden;
     const uint32_t saved_limit = vm_read32(limit_at);
+    const int requested = (int32_t)ctx->gpr[6];
     vm_writef(limit_at, std::numeric_limits<float>::max());
     s_add(ctx);
     storage_write32(limit_at, saved_limit); // restored before any deposit or return
@@ -1421,6 +1457,13 @@ void add_detour(ppu_context* ctx)
         fprintf(stderr, "[des] storage: approved add delta %d at slot %d\n", delta, slot);
         storage_write32(inv + 0x1B0, 1);
         ctx->gpr[3] = (uint64_t)(int64_t)-1;
+        return;
+    }
+    if (delta != requested) {
+        call_game(ctx, func_008FD2A8, {inv, slot, -delta, 1});
+        storage_write32(inv + 0x1B0, 1);
+        ctx->gpr[3] = (uint64_t)(int64_t)-1;
+        fprintf(stderr, "[des] storage: partial ground add %d of %d undone; pile retained\n", delta, requested);
         return;
     }
     // Keep the slot alive until the pickup helper finishes applying durability
@@ -1449,6 +1492,9 @@ void inventory_confirmation_tick(ppu_context* ctx)
     if (!m) { pending = {}; return; }
     if (pending.state == InventoryAsk::Armed) {
         if (g_pad0_buttons & 0x6000u) return;
+        const int room = storage_room(ctx, vm_read32(pending.player + kPgdBox), pending.item);
+        const int maximum = room < pending.item.count ? room : pending.item.count;
+        if (maximum < 1) { pending = {}; return; }
         const uint32_t text = guest_text(ctx, "How many items to send to Storage?");
         if (!text) { pending = {}; return; }
         const uint32_t root = vm_read32(DES_AT(0x019ADF0Cu));
@@ -1457,7 +1503,7 @@ void inventory_confirmation_tick(ppu_context* ctx)
         call_game(ctx, func_00720F50, {mode == 1 ? 0x85 : 0x95, 1});
         call_game(ctx, func_00720F50, {0x89, 1});
         call_game(ctx, func_00720F50, {0x68, 1});
-        call_game(ctx, func_007731F0, {11000, 1, 2, pending.item.count, 1, pending.item.count, 0xEAC4});
+        call_game(ctx, func_007731F0, {11000, 1, 2, maximum, 1, maximum, 0xEAC4});
         call_game(ctx, func_00720F50, {2, 9});
         call_game(ctx, func_00720F50, {0x68, 1});
         storage_write32(m + 0x820, text);
@@ -1465,7 +1511,8 @@ void inventory_confirmation_tick(ppu_context* ctx)
         pending.closed_ticks = 0;
         call_game(ctx, func_0072D970, {100});
         pending.state = InventoryAsk::Asking;
-        fprintf(stderr, "[des] storage: inventory quantity picker for id %u x%d\n", pending.item.id, pending.item.count);
+        fprintf(stderr, "[des] storage: inventory quantity picker for id %u x%d (box room %d, picker max %d)\n",
+                pending.item.id, pending.item.count, room, maximum);
         return;
     }
     if (pending.state == InventoryAsk::Ready) {
@@ -1561,6 +1608,7 @@ void ask_storage(ppu_context* ctx)
 #ifdef _WIN32
 extern "C" __declspec(dllimport) int __stdcall VirtualProtect(void*, size_t, unsigned long, unsigned long*);
 extern "C" __declspec(dllimport) void* __stdcall VirtualAlloc(void*, size_t, unsigned long, unsigned long);
+extern "C" __declspec(dllimport) int __stdcall VirtualFree(void*, size_t, unsigned long);
 extern "C" __declspec(dllimport) int __stdcall FlushInstructionCache(void*, const void*, size_t);
 extern "C" __declspec(dllimport) void* __stdcall GetCurrentProcess(void);
 #endif
@@ -1622,30 +1670,73 @@ void write_abs_jmp(uint8_t* at, void* dest)
 void pickup_detour(ppu_context* ctx);
 int32_t burden_reason();
 
-bool hook_lift(const char* name, void (*replacement)(ppu_context*), void (**original)(ppu_context*))
+struct LiftHook {
+    const char* name;
+    void (*replacement)(ppu_context*);
+    void (**original)(ppu_context*);
+    uint8_t* code = nullptr;
+    uint8_t* gate = nullptr;
+    int size = 0;
+    unsigned long protection = 0;
+};
+
+bool hook_lifts(LiftHook* hooks, size_t count)
 {
 #if defined(PS3_GAME_SPLIT) && defined(_WIN32)
-    auto fn = des_lift_find(name);
-    if (!fn) return false;
-    auto* code = (uint8_t*)fn;
-    const int n = steal_len(code);
-    if (!n) {
-        fprintf(stderr, "[des] storage: unsupported prologue for %s:", name);
-        for (int i = 0; i < 24; i++) fprintf(stderr, " %02x", code[i]);
-        fprintf(stderr, "\n");
+    size_t writable = 0;
+    auto abandon = [&]() {
+        // Two entry points may share a page. Restore in reverse order so the
+        // first protection we saw, not a later PAGE_EXECUTE_READWRITE, wins.
+        while (writable) {
+            LiftHook& h = hooks[--writable];
+            unsigned long unused;
+            if (!VirtualProtect(h.code, (size_t)h.size, h.protection, &unused))
+                fprintf(stderr, "[des] storage: could not restore protection for %s\n", h.name);
+        }
+        for (size_t i = 0; i < count; i++)
+            if (hooks[i].gate) {
+                VirtualFree(hooks[i].gate, 0, 0x8000);
+                hooks[i].gate = nullptr;
+            }
         return false;
+    };
+    // Resolve and prepare every trampoline before modifying any entry point.
+    // A missing symbol, unsupported prologue or allocation failure must not
+    // leave a notice/add hook behind when pickup itself cannot be hooked.
+    for (size_t i = 0; i < count; i++) {
+        LiftHook& h = hooks[i];
+        h.code = (uint8_t*)des_lift_find(h.name);
+        if (!h.code) return abandon();
+        h.size = steal_len(h.code);
+        if (!h.size) {
+            fprintf(stderr, "[des] storage: unsupported prologue for %s\n", h.name);
+            return abandon();
+        }
+        h.gate = (uint8_t*)VirtualAlloc(nullptr, 64, 0x3000, 0x40);
+        if (!h.gate) return abandon();
+        memcpy(h.gate, h.code, (size_t)h.size);
+        write_abs_jmp(h.gate + h.size, h.code + h.size);
+        FlushInstructionCache(GetCurrentProcess(), h.gate, 64);
     }
-    auto* gate = (uint8_t*)VirtualAlloc(nullptr, 64, 0x3000, 0x40);
-    if (!gate) return false;
-    memcpy(gate, code, (size_t)n);
-    write_abs_jmp(gate + n, code + n);
-    unsigned long old = 0;
-    if (!VirtualProtect(code, (size_t)n, 0x40, &old)) return false;
-    *original = (void (*)(ppu_context*))gate;
-    write_abs_jmp(code, (void*)replacement);
-    VirtualProtect(code, (size_t)n, old, &old);
-    FlushInstructionCache(GetCurrentProcess(), gate, 64);
-    FlushInstructionCache(GetCurrentProcess(), code, (size_t)n);
+    // Acquire all write permissions first. Failure here still leaves every
+    // function's bytes and every original callback unchanged.
+    for (size_t i = 0; i < count; i++) {
+        LiftHook& h = hooks[i];
+        if (!VirtualProtect(h.code, (size_t)h.size, 0x40, &h.protection)) return abandon();
+        writable++;
+    }
+    for (size_t i = 0; i < count; i++) *hooks[i].original = (void (*)(ppu_context*))hooks[i].gate;
+    for (size_t i = 0; i < count; i++) {
+        LiftHook& h = hooks[i];
+        write_abs_jmp(h.code, (void*)h.replacement);
+        FlushInstructionCache(GetCurrentProcess(), h.code, (size_t)h.size);
+    }
+    while (writable) {
+        LiftHook& h = hooks[--writable];
+        unsigned long unused;
+        if (!VirtualProtect(h.code, (size_t)h.size, h.protection, &unused))
+            fprintf(stderr, "[des] storage: could not restore protection for %s\n", h.name);
+    }
     return true;
 #else
     return false;
@@ -1660,9 +1751,12 @@ void install_pickup()
 #ifdef PS3_GAME_SPLIT
     s_remove_pile = des_lift_find("func_0036C238");
 #endif
-    if (!s_remove_pile || !hook_lift("func_004C7B20", pickup_notice_detour, &s_pickup_notice) ||
-        !hook_lift("func_008FB4F0", add_detour, &s_add) ||
-        !hook_lift("func_004C6DF0", pickup_detour, &s_pickup)) {
+    LiftHook hooks[] = {
+        {"func_004C7B20", pickup_notice_detour, &s_pickup_notice},
+        {"func_008FB4F0", add_detour, &s_add},
+        {"func_004C6DF0", pickup_detour, &s_pickup},
+    };
+    if (!s_remove_pile || !hook_lifts(hooks, sizeof hooks / sizeof hooks[0])) {
         fprintf(stderr, "[des] storage: pickup hooks unavailable; native pickup retained\n");
         return;
     }
@@ -1707,7 +1801,8 @@ void pickup_detour(ppu_context* ctx)
         size_t moved = 0;
         for (; ok && moved < s_added.size(); moved++) {
             const Added& a = s_added[moved];
-            ok = call_game(ctx, deposit_fn(), {box, inv, a.slot, a.count}) == 1;
+            ok = a.count <= storage_room(ctx, box, a.item) &&
+                call_game(ctx, deposit_fn(), {box, inv, a.slot, a.count}) == 1;
             if (!ok) break;
         }
         if (!ok) {
@@ -1805,6 +1900,19 @@ void storage_tick(ppu_context* ctx)
     if (s_ask == Ask::Approved && !(g_pad0_buttons & 0x6000u)) {
         s_ask = Ask::Idle;
         if (find_refused_pile()) {
+            const uint32_t p = pgd();
+            const uint32_t box = p ? vm_read32(p + kPgdBox) : 0;
+            const Entry item{pickup_category((uint32_t)s_request.category), (uint32_t)s_request.id,
+                             (int32_t)s_request.count};
+            // Reject before native acquisition can queue its success window.
+            // The inner deposit guard still rechecks capacity at commit time.
+            if (s_request.count < 1 || s_request.count > 9999 ||
+                item.count > storage_room(ctx, box, item)) {
+                fprintf(stderr, "[des] storage: box cannot fit ground id %u x%d; pile retained\n", item.id, item.count);
+                release_refused_pile(ctx);
+                call_game(ctx, func_0072D970, {200});
+                return;
+            }
 #ifdef PS3_GAME_SPLIT
             static auto prepare = des_lift_find("func_004C58F0");
             static auto mode = des_lift_find("func_004C2B98");

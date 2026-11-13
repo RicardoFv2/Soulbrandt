@@ -318,6 +318,12 @@ jobs:
           done
           exit $fail
 
+      - name: Storage hook installation (synthetic functions, injected failures)
+        run: python tools/ci/check_storage_hooks.py --cxx c++
+
+      - name: Storage capacity guard (synthetic native queries)
+        run: python tools/ci/check_storage_capacity.py --cxx c++
+
       # The European disc (BLES00932): every guest address the port uses has its European address in
       # port/regions/BLES00932.inc, and is read through DES_AT (des_region.h). tools/region/region_table.py.
       - name: European disc's address table
