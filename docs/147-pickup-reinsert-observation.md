@@ -71,9 +71,9 @@ That run preceded rebasing this observer commit onto the current #519 head
 `941e1ef`. The rebased candidate was then built with `DES_DEV=ON`,
 `DES_SPLIT=ON`, `DES_REQUIRE_PIN=ON`, and the exact ps3recomp pin
 `7d2cd5e92291cae5d93d664c90a7997074e87e20`. Its `des_host.exe` SHA-256 is
-`055BD63EE9EE070F2CFAF16A050AE041A85C077A46EE87847EB9A02ACB0876CB`; the
-`des_game.dll` SHA-256 remains
-`D1DE83DB04618E79EE159CD7A4DE1342242E8994093BC3B7CB334CF05A3EC300`. The
+`055BD63EE9EE070F2CFAF16A050AE041A85C077A46EE87847EB9A02ACB0876CB`.
+`des_game` was already up to date and was not relinked; its existing DLL SHA-256
+is `D1DE83DB04618E79EE159CD7A4DE1342242E8994093BC3B7CB334CF05A3EC300`. The
 existing gameplay process was preserved, so the rebased host was not launched
 for a second dynamic replay.
 
