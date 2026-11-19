@@ -9,6 +9,24 @@
 0x00217E70=des_motion_blur   # cmpwi cr7, r0 (= byte +0x1D4), 0
 
 # Dev hooks (docs/55). Every line calls des_dev_hook, which is empty in release builds.
+# DES_PICKUP_TRACE=1 opts into dev-build-only, host-stderr observation of the
+# pickup record, rejection, local node/key reinsertion and subsequent lookups.
+0x0036D7FC=des_dev_hook   # pickup: copied ground record at r1+0x70; manager r31, lookup key r4, node r11
+0x0036D600=des_dev_hook   # pickup: acquisition entry; log incoming LR to distinguish local, event and other callers
+0x004C6DF0=des_dev_hook   # pickup: native add entry; copied record fields in r4-r7
+0x004C733C=des_dev_hook   # pickup: native inventory-result field in r0 after read from inventory+0x1B0
+0x004C74F0=des_dev_hook   # pickup: native cmpwi r0,1; EQ takes the native -1 return path
+0x0036D678=des_dev_hook   # pickup: func_004C6DF0 return; result r3, manager r31, copied record r29
+0x0036D0D8=des_dev_hook   # pickup: native reinsertion entry; manager r3, copied record r4, mode r5
+0x0036CDB8=des_dev_hook   # pickup: reinsertion helper entry; ctx->lr selects the offline continuation at D3BC
+0x0036CBD0=des_dev_hook   # pickup: after node+8 receives manager+4 key and before the following counter store
+0x0036CBD4=des_dev_hook   # pickup: after manager+4 increments, to verify the key/counter transition
+0x0036CE34=des_dev_hook   # pickup: post-call node return; r3=node, r29=manager
+0x0036CE44=des_dev_hook   # pickup: compare manager root with zero before reinsertion branch
+0x0036CE4C=des_dev_hook   # pickup: compare returned node with zero before reinsertion branch
+0x0036D3BC=des_dev_hook   # pickup: return from offline reinsertion helper
+0x0036D9A4=des_dev_hook   # pickup: local list lookup before unlink BL; manager r31, key r4, node r11
+0x0036DE00=des_dev_hook   # pickup: event list lookup before unlink BL; manager r3, key r4, node r9
 0x00280E64=des_dev_hook   # dev hook: hit HP damage (ApplyDamage 0x00280DC8)
 0x00280F88=des_dev_hook   # dev hook: hit stamina damage (ApplyDamage)
 0x0028B224=des_dev_hook   # dev hook: hit damage after the calculation (handler 0x0028B1D8)
