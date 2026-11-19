@@ -166,6 +166,19 @@ DES_REGION_ADDR(0x00313B24, 0x003148FC)  /* hook des_net_sync */
 DES_REGION_ADDR(0x003147EC, 0x003155C4)  /* hook des_ghost_rate */
 DES_REGION_ADDR(0x00314ABC, 0x00315894)  /* hook des_ghost_rate */
 DES_REGION_ADDR(0x00315030, 0x00315E08)  /* hook des_ghost_rate */
+DES_REGION_ADDR(0x0036CBD0, 0x0036D980)  /* pickup hook des_dev_hook: node key written before counter increment */
+DES_REGION_ADDR(0x0036CBD4, 0x0036D984)  /* pickup hook des_dev_hook: counter increment after node key */
+DES_REGION_ADDR(0x0036CDB8, 0x0036DA68)  /* pickup hook des_dev_hook: reinsertion helper entry */
+DES_REGION_ADDR(0x0036CE34, 0x0036DBE4)  /* pickup hook des_dev_hook: post-call node return */
+DES_REGION_ADDR(0x0036CE44, 0x0036DBF4)  /* pickup hook des_dev_hook: manager-root comparison */
+DES_REGION_ADDR(0x0036CE4C, 0x0036DBFC)  /* pickup hook des_dev_hook: returned-node comparison */
+DES_REGION_ADDR(0x0036D0D8, 0x0036DE88)  /* pickup hook des_dev_hook: native reinsertion */
+DES_REGION_ADDR(0x0036D3BC, 0x0036E16C)  /* pickup hook des_dev_hook: reinsertion helper return */
+DES_REGION_ADDR(0x0036D600, 0x0036E3B0)  /* pickup hook des_dev_hook: acquisition entry LR */
+DES_REGION_ADDR(0x0036D678, 0x0036E428)  /* pickup hook des_dev_hook: add result */
+DES_REGION_ADDR(0x0036D7FC, 0x0036E5AC)  /* pickup hook des_dev_hook: copied record */
+DES_REGION_ADDR(0x0036D9A4, 0x0036E754)  /* pickup hook des_dev_hook: local lookup before unlink BL */
+DES_REGION_ADDR(0x0036DE00, 0x0036EBB0)  /* pickup hook des_dev_hook: event lookup before unlink BL */
 DES_REGION_ADDR(0x00391818, 0x003925E0)  /* hook des_net_replay */
 DES_REGION_ADDR(0x003957B8, 0x00396580)  /* hook des_net_replay */
 DES_REGION_ADDR(0x003A596C, 0x003A6734)  /* hook des_net_replay */
@@ -196,6 +209,9 @@ DES_REGION_ADDR(0x0044C6F0, 0x0044D4D8)  /* call des_seamless_game (by address) 
 DES_REGION_ADDR(0x0044C780, 0x0044D568)  /* hook des_coop_hook: the end of WarpNextStageKick (a guest going home loads its own area) */
 DES_REGION_ADDR(0x00451430, 0x00452218)  /* call */
 DES_REGION_ADDR(0x00467628, 0x00468410)  /* hook des_coop_hook: a script event's name */
+DES_REGION_ADDR(0x004C6DF0, 0x004C7BD8)  /* pickup hook des_dev_hook: native add entry */
+DES_REGION_ADDR(0x004C733C, 0x004C8124)  /* pickup hook des_dev_hook: inventory result field */
+DES_REGION_ADDR(0x004C74F0, 0x004C82D8)  /* pickup hook des_dev_hook: native -1 comparison */
 DES_REGION_ADDR(0x004C9638, 0x004CA420)  /* hook des_coop_hook: the talk check after bl 0x0026F378 (a friend can talk to the NPCs) */
 DES_REGION_ADDR(0x004C9C5C, 0x004CAA44)  /* hook des_coop_hook: the talk check after bl 0x0026F378 (a friend can talk to the NPCs) */
 DES_REGION_ADDR(0x005086F8, 0x005094F0)  /* hook des_coop_hook: the event flags' set (progress kept for every player) */

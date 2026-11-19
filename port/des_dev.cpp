@@ -88,6 +88,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
+#include <thread>
 
 #if !DES_DEV
 #error "des_dev.cpp is only for developer builds (cmake -DDES_DEV=ON)"
@@ -257,11 +259,410 @@ void dev_log(int site, const char* what, double before, double after, uint32_t c
     between[site] = 0;
 }
 
+constexpr uint32_t kPickupTraceCopied = 0x0036D7FCu;
+constexpr uint32_t kPickupTraceAddEntry = 0x004C6DF0u;
+constexpr uint32_t kPickupTraceReasonLoad = 0x004C733Cu;
+constexpr uint32_t kPickupTraceMinusOneTest = 0x004C74F0u;
+constexpr uint32_t kPickupTraceAddReturn = 0x0036D678u;
+constexpr uint32_t kPickupTraceReinsert = 0x0036D0D8u;
+constexpr uint32_t kPickupTraceAcquireEntry = 0x0036D600u;
+constexpr uint32_t kPickupTraceReinsertHelperEntry = 0x0036CDB8u;
+constexpr uint32_t kPickupTraceNodeReturn = 0x0036CE34u;
+constexpr uint32_t kPickupTraceRootCompare = 0x0036CE44u;
+constexpr uint32_t kPickupTraceNodeCompare = 0x0036CE4Cu;
+constexpr uint32_t kPickupTraceKeyWritten = 0x0036CBD0u;
+constexpr uint32_t kPickupTraceCounterIncremented = 0x0036CBD4u;
+constexpr uint32_t kPickupTraceReinsertReturn = 0x0036D3BCu;
+constexpr uint32_t kPickupTraceLocalLookup = 0x0036D9A4u;
+constexpr uint32_t kPickupTraceEventLookup = 0x0036DE00u;
+
+struct PickupTraceState {
+    bool active = false;
+    bool native_add_active = false;
+    bool reason_seen = false;
+    bool minus_one_path = false;
+    bool rejected = false;
+    bool copy_pending = false;
+    bool offline_reinsert = false;
+    bool key_written = false;
+    uint32_t source_manager = 0;
+    uint32_t source_lookup_key = 0;
+    uint32_t source_node = 0;
+    uint32_t source_record = 0;
+    uint32_t add_manager = 0;
+    uint32_t add_record = 0;
+    uint32_t reinsert_manager = 0;
+    uint32_t reinsert_record = 0;
+    uint32_t node_manager = 0;
+    uint32_t node = 0;
+    uint32_t key = 0;
+    uint32_t reinsert_lr = 0;
+    uint32_t fields[4]{};
+    uint32_t node_position[4]{};
+    uint32_t node_fields[4]{};
+    int32_t reason_field = 0;
+    uint32_t sequence = 0;
+};
+
+/* Host-only correlation, indexed by thread. These slots never touch the PPU
+ * context or guest memory; the ring tolerates nested pickup checks on a thread. */
+thread_local PickupTraceState s_pickup_trace[8];
+thread_local uint32_t s_pickup_trace_sequence = 0;
+
+uint64_t pickup_trace_thread_id()
+{
+    return static_cast<uint64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+}
+
+bool pickup_trace_read_fields(uint32_t record, uint32_t (&fields)[4])
+{
+    if (!guest_ptr_ok(record) || record > 0xFFFFFFF3u) return false;
+    for (unsigned i = 0; i < 4; i++) fields[i] = vm_read32(record + i * 4u);
+    return true;
+}
+
+bool pickup_trace_read_words(uint32_t address, uint32_t (&words)[4])
+{
+    if (!guest_ptr_ok(address) || address > 0xFFFFFFF3u) return false;
+    for (unsigned i = 0; i < 4; i++) words[i] = vm_read32(address + i * 4u);
+    return true;
+}
+
+bool pickup_trace_read_node(uint32_t node, uint32_t& key, uint32_t (&position)[4], uint32_t (&fields)[4])
+{
+    if (!guest_ptr_ok(node) || node > 0xFFFFFFD3u) return false;
+    key = vm_read32(node + 0x8u);
+    return pickup_trace_read_words(node + 0x10u, position) &&
+           pickup_trace_read_words(node + 0x20u, fields);
+}
+
+bool pickup_trace_fields_equal(const uint32_t (&a)[4], const uint32_t (&b)[4])
+{
+    for (unsigned i = 0; i < 4; i++) if (a[i] != b[i]) return false;
+    return true;
+}
+
+PickupTraceState* pickup_trace_find_fields(const uint32_t (&fields)[4], bool rejected_only = false)
+{
+    PickupTraceState* found = nullptr;
+    for (PickupTraceState& state : s_pickup_trace) {
+        if (!state.active || (rejected_only && !state.rejected) ||
+            !pickup_trace_fields_equal(state.fields, fields)) continue;
+        if (!found || static_cast<int32_t>(state.sequence - found->sequence) > 0) found = &state;
+    }
+    return found;
+}
+
+PickupTraceState* pickup_trace_new(const uint32_t (&fields)[4], uint32_t record)
+{
+    const uint32_t sequence = ++s_pickup_trace_sequence;
+    PickupTraceState& state = s_pickup_trace[sequence % 8u];
+    state = {};
+    state.active = true;
+    state.source_record = record;
+    state.sequence = sequence;
+    memcpy(state.fields, fields, sizeof(fields));
+    return &state;
+}
+
+PickupTraceState* pickup_trace_find_native_add()
+{
+    PickupTraceState* found = nullptr;
+    for (PickupTraceState& state : s_pickup_trace) {
+        if (!state.active || !state.native_add_active) continue;
+        if (!found || static_cast<int32_t>(state.sequence - found->sequence) > 0) found = &state;
+    }
+    return found;
+}
+
+PickupTraceState* pickup_trace_find_rejected(bool offline_only = false)
+{
+    PickupTraceState* found = nullptr;
+    for (PickupTraceState& state : s_pickup_trace) {
+        if (!state.active || !state.rejected || (offline_only && !state.offline_reinsert)) continue;
+        if (!found || static_cast<int32_t>(state.sequence - found->sequence) > 0) found = &state;
+    }
+    return found;
+}
+
+PickupTraceState* pickup_trace_find_lookup(uint32_t manager, uint32_t key,
+                                          const uint32_t (&position)[4], const uint32_t (&fields)[4])
+{
+    PickupTraceState* found = nullptr;
+    for (PickupTraceState& state : s_pickup_trace) {
+        if (!state.active || !state.rejected || !state.key_written || state.node_manager != manager ||
+            state.key != key || !pickup_trace_fields_equal(state.node_position, position) ||
+            !pickup_trace_fields_equal(state.node_fields, fields)) continue;
+        if (!found || static_cast<int32_t>(state.sequence - found->sequence) > 0) found = &state;
+    }
+    return found;
+}
+
+bool pickup_trace_site(uint32_t addr)
+{
+    return addr == kPickupTraceCopied || addr == kPickupTraceAddEntry || addr == kPickupTraceReasonLoad ||
+           addr == kPickupTraceMinusOneTest || addr == kPickupTraceAddReturn || addr == kPickupTraceReinsert ||
+           addr == kPickupTraceAcquireEntry || addr == kPickupTraceReinsertHelperEntry ||
+           addr == kPickupTraceNodeReturn || addr == kPickupTraceRootCompare || addr == kPickupTraceNodeCompare ||
+           addr == kPickupTraceKeyWritten || addr == kPickupTraceCounterIncremented ||
+           addr == kPickupTraceReinsertReturn ||
+           addr == kPickupTraceLocalLookup || addr == kPickupTraceEventLookup;
+}
+
+void pickup_trace_hook(ppu_context* ctx, uint32_t addr)
+{
+    const uint64_t tid = pickup_trace_thread_id();
+    const char* region = des_region_title_id(des_region());
+    if (addr == kPickupTraceAcquireEntry) {
+        const uint32_t lr = static_cast<uint32_t>(ctx->lr);
+        fprintf(stderr, "[pickup-trace] acquire-entry region=%s thread=%016llX lr=%08X args=%08X,%08X,%08X,%08X\n",
+                region, static_cast<unsigned long long>(tid), lr, gpr32(ctx, 3), gpr32(ctx, 4),
+                gpr32(ctx, 5), gpr32(ctx, 6));
+        return;
+    }
+
+    if (addr == kPickupTraceCopied) {
+        const uint32_t sp = gpr32(ctx, 1), manager = gpr32(ctx, 31);
+        const uint32_t key = gpr32(ctx, 4), node = gpr32(ctx, 11);
+        const bool address_ok = sp <= 0xFFFFFF8Fu;
+        const uint32_t record = address_ok ? sp + 0x70u : 0;
+        uint32_t fields[4]{};
+        const bool readable = address_ok && pickup_trace_read_fields(record, fields);
+        PickupTraceState* state = readable ? pickup_trace_new(fields, record) : nullptr;
+        if (state) {
+            state->copy_pending = true;
+            state->source_manager = manager;
+            state->source_lookup_key = key;
+            state->source_node = node;
+            state->source_record = record;
+        }
+        fprintf(stderr, "[pickup-trace] pre-add-copy region=%s thread=%016llX seq=%u manager=%08X lookup_key=%08X node=%08X sp=%08X record=%08X readable=%d fields=%08X,%08X,%08X,%08X\n",
+                region, static_cast<unsigned long long>(tid), state ? state->sequence : 0, manager, key, node, sp, record, readable ? 1 : 0,
+                fields[0], fields[1], fields[2], fields[3]);
+        return;
+    }
+
+    if (addr == kPickupTraceAddEntry) {
+        const uint32_t fields[4] = {gpr32(ctx, 4), gpr32(ctx, 5), gpr32(ctx, 6), gpr32(ctx, 7)};
+        PickupTraceState* state = pickup_trace_find_fields(fields);
+        if (!state || !state->copy_pending) state = pickup_trace_new(fields, 0);
+        state->copy_pending = false;
+        state->reason_seen = false;
+        state->minus_one_path = false;
+        state->rejected = false;
+        state->offline_reinsert = false;
+        state->key_written = false;
+        state->reinsert_lr = 0;
+        state->add_record = 0;
+        state->reinsert_record = 0;
+        state->node_manager = 0;
+        state->node = 0;
+        state->key = 0;
+        memset(state->node_position, 0, sizeof(state->node_position));
+        memset(state->node_fields, 0, sizeof(state->node_fields));
+        state->native_add_active = true;
+        state->add_manager = gpr32(ctx, 3);
+        fprintf(stderr, "[pickup-trace] native-add-entry region=%s thread=%016llX seq=%u manager_arg=%08X candidate=%d fields=%08X,%08X,%08X,%08X\n",
+                region, static_cast<unsigned long long>(tid), state->sequence, state->add_manager, state->source_record ? 1 : 0,
+                fields[0], fields[1], fields[2], fields[3]);
+        return;
+    }
+
+    if (addr == kPickupTraceReasonLoad) {
+        const int32_t reason = sgpr32(ctx, 0);
+        PickupTraceState* state = pickup_trace_find_native_add();
+        if (state) {
+            state->reason_seen = true;
+            state->reason_field = reason;
+        }
+        fprintf(stderr, "[pickup-trace] inventory-result-field region=%s thread=%016llX seq=%u candidate=%d inventory=%08X reason=%d\n",
+                region, static_cast<unsigned long long>(tid), state ? state->sequence : 0, state ? 1 : 0, gpr32(ctx, 29), reason);
+        return;
+    }
+
+    if (addr == kPickupTraceMinusOneTest) {
+        const int32_t reason = sgpr32(ctx, 0);
+        const bool cr7_equal = (ctx->crf[7] & 2u) != 0;
+        const bool minus_one_path = reason == 1 && cr7_equal;
+        PickupTraceState* state = pickup_trace_find_native_add();
+        if (state) state->minus_one_path = minus_one_path;
+        fprintf(stderr, "[pickup-trace] native-minus-one-test region=%s thread=%016llX seq=%u candidate=%d reason=%d cr7_equal=%d minus_one_path=%d reason_matches_load=%d\n",
+                region, static_cast<unsigned long long>(tid), state ? state->sequence : 0, state ? 1 : 0, reason, cr7_equal ? 1 : 0,
+                minus_one_path ? 1 : 0, state && state->reason_seen && state->reason_field == reason ? 1 : 0);
+        return;
+    }
+
+    if (addr == kPickupTraceAddReturn) {
+        const uint32_t manager = gpr32(ctx, 31), record = gpr32(ctx, 29);
+        uint32_t fields[4]{};
+        const bool readable = pickup_trace_read_fields(record, fields);
+        PickupTraceState* state = pickup_trace_find_native_add();
+        if (state && readable && !pickup_trace_fields_equal(state->fields, fields)) state = nullptr;
+        if (!state && readable) state = pickup_trace_find_fields(fields);
+        if (!state) state = pickup_trace_find_native_add();
+        const bool same_fields = state && readable && pickup_trace_fields_equal(state->fields, fields);
+        const int32_t result = sgpr32(ctx, 3);
+        fprintf(stderr, "[pickup-trace] add-return region=%s thread=%016llX seq=%u manager=%08X record=%08X result=%d rejected_minus_one=%d correlated=%d reason_seen=%d reason_field=%d minus_one_path=%d fields_same=%d fields=%08X,%08X,%08X,%08X\n",
+                region, static_cast<unsigned long long>(tid), state ? state->sequence : 0, manager, record, result, result == -1 ? 1 : 0,
+                state ? 1 : 0, state && state->reason_seen ? 1 : 0, state ? state->reason_field : 0,
+                state && state->minus_one_path ? 1 : 0,
+                same_fields ? 1 : 0, fields[0], fields[1], fields[2], fields[3]);
+        if (state) {
+            state->native_add_active = false;
+            state->add_manager = manager;
+            state->add_record = record;
+            state->rejected = result == -1;
+        }
+        return;
+    }
+
+    if (addr == kPickupTraceReinsert) {
+        const uint32_t manager = gpr32(ctx, 3), record = gpr32(ctx, 4), mode = gpr32(ctx, 5);
+        uint32_t fields[4]{};
+        const bool readable = pickup_trace_read_fields(record, fields);
+        PickupTraceState* state = readable ? pickup_trace_find_fields(fields, true) : pickup_trace_find_rejected();
+        const bool same_fields = state && readable && pickup_trace_fields_equal(state->fields, fields);
+        if (state) {
+            state->reinsert_manager = manager;
+            state->reinsert_record = record;
+        }
+        fprintf(stderr, "[pickup-trace] native-reinsert region=%s thread=%016llX seq=%u manager=%08X source_manager=%08X source_key=%08X source_node=%08X record=%08X add_record=%08X mode=%08X correlated_reject=%d minus_one_path=%d record_same=%d fields_same=%d readable=%d fields=%08X,%08X,%08X,%08X\n",
+                region, static_cast<unsigned long long>(tid), state ? state->sequence : 0, manager,
+                state ? state->source_manager : 0, state ? state->source_lookup_key : 0,
+                state ? state->source_node : 0, record, state ? state->add_record : 0, mode,
+                state ? 1 : 0, state && state->minus_one_path ? 1 : 0,
+                state && state->add_record == record ? 1 : 0, same_fields ? 1 : 0, readable ? 1 : 0,
+                fields[0], fields[1], fields[2], fields[3]);
+        return;
+    }
+
+    if (addr == kPickupTraceReinsertHelperEntry) {
+        const uint32_t lr = static_cast<uint32_t>(ctx->lr);
+        const uint32_t expected_lr = DES_AT(kPickupTraceReinsertReturn);
+        const uint32_t manager = gpr32(ctx, 3), record = gpr32(ctx, 4);
+        uint32_t fields[4]{};
+        const bool readable = pickup_trace_read_fields(record, fields);
+        PickupTraceState* state = readable ? pickup_trace_find_fields(fields, true) : nullptr;
+        if (!state && lr == expected_lr) state = pickup_trace_find_rejected();
+        if (state && lr == expected_lr) {
+            state->offline_reinsert = true;
+            state->reinsert_lr = lr;
+            state->reinsert_manager = manager;
+            state->reinsert_record = record;
+        }
+        fprintf(stderr, "[pickup-trace] reinsert-helper-entry region=%s thread=%016llX seq=%u lr=%08X expected_offline_lr=%08X offline_path=%d manager=%08X record=%08X readable=%d fields=%08X,%08X,%08X,%08X\n",
+                region, static_cast<unsigned long long>(tid), state ? state->sequence : 0, lr, expected_lr,
+                lr == expected_lr ? 1 : 0, manager, record, readable ? 1 : 0,
+                fields[0], fields[1], fields[2], fields[3]);
+        return;
+    }
+
+    if (addr == kPickupTraceKeyWritten) {
+        const uint32_t node = gpr32(ctx, 31), manager = gpr32(ctx, 27);
+        uint32_t key = 0, position[4]{}, fields[4]{};
+        const bool readable = pickup_trace_read_node(node, key, position, fields);
+        PickupTraceState* state = pickup_trace_find_rejected(true);
+        const uint32_t counter = guest_ptr_ok(manager) ? vm_read32(manager + 4u) : 0;
+        const uint32_t head = guest_ptr_ok(manager) ? vm_read32(manager + 0xCu) : 0;
+        if (state && readable) {
+            state->node_manager = manager;
+            state->node = node;
+            state->key = key;
+            state->key_written = true;
+            memcpy(state->node_position, position, sizeof(position));
+            memcpy(state->node_fields, fields, sizeof(fields));
+        }
+        fprintf(stderr, "[pickup-trace] node-key-written region=%s thread=%016llX seq=%u offline_reinsert=%d manager=%08X manager_counter=%08X manager_head=%08X node=%08X key=%08X key_matches_counter=%d readable=%d pos=%08X,%08X,%08X,%08X fields=%08X,%08X,%08X,%08X\n",
+                region, static_cast<unsigned long long>(tid), state ? state->sequence : 0,
+                state && state->offline_reinsert ? 1 : 0, manager, counter, head, node, key,
+                readable && key == counter ? 1 : 0, readable ? 1 : 0,
+                position[0], position[1], position[2], position[3], fields[0], fields[1], fields[2], fields[3]);
+        return;
+    }
+
+    if (addr == kPickupTraceCounterIncremented) {
+        const uint32_t node = gpr32(ctx, 31), manager = gpr32(ctx, 27);
+        const uint32_t key = guest_ptr_ok(node) ? vm_read32(node + 8u) : 0;
+        const uint32_t counter = guest_ptr_ok(manager) ? vm_read32(manager + 4u) : 0;
+        PickupTraceState* state = pickup_trace_find_rejected(true);
+        fprintf(stderr, "[pickup-trace] node-key-counter-incremented region=%s thread=%016llX seq=%u offline_reinsert=%d manager=%08X node=%08X key=%08X manager_counter=%08X counter_is_key_plus_one=%d same_key_as_preincrement=%d\n",
+                region, static_cast<unsigned long long>(tid), state ? state->sequence : 0,
+                state && state->offline_reinsert ? 1 : 0, manager, node, key, counter,
+                counter == key + 1u ? 1 : 0, state && state->key_written && state->key == key ? 1 : 0);
+        return;
+    }
+
+    if (addr == kPickupTraceNodeReturn) {
+        const uint32_t node = gpr32(ctx, 3), manager = gpr32(ctx, 29);
+        uint32_t key = 0, position[4]{}, fields[4]{};
+        const bool readable = pickup_trace_read_node(node, key, position, fields);
+        const uint32_t head = guest_ptr_ok(manager) ? vm_read32(manager + 0xCu) : 0;
+        PickupTraceState* state = pickup_trace_find_rejected(true);
+        const bool same_node = state && state->node == node;
+        const bool same_key = state && state->key_written && state->key == key;
+        const bool same_fields = state && pickup_trace_fields_equal(state->node_fields, fields);
+        const bool same_position = state && pickup_trace_fields_equal(state->node_position, position);
+        fprintf(stderr, "[pickup-trace] reinsertion-node-return region=%s thread=%016llX seq=%u offline_reinsert=%d reinsert_lr=%08X manager=%08X manager_head=%08X node=%08X key=%08X node_key_matches=%d same_node_as_key_write=%d same_key=%d same_fields=%d same_position=%d readable=%d pos=%08X,%08X,%08X,%08X fields=%08X,%08X,%08X,%08X\n",
+                region, static_cast<unsigned long long>(tid), state ? state->sequence : 0,
+                state && state->offline_reinsert ? 1 : 0, state ? state->reinsert_lr : 0, manager, head, node, key,
+                readable && vm_read32(node + 8u) == key ? 1 : 0, same_node ? 1 : 0,
+                same_key ? 1 : 0, same_fields ? 1 : 0, same_position ? 1 : 0, readable ? 1 : 0,
+                position[0], position[1], position[2], position[3], fields[0], fields[1], fields[2], fields[3]);
+        return;
+    }
+
+    if (addr == kPickupTraceRootCompare || addr == kPickupTraceNodeCompare) {
+        const uint32_t manager = gpr32(ctx, 27), node = gpr32(ctx, 29);
+        const uint32_t root = guest_ptr_ok(manager) ? vm_read32(manager) : 0;
+        const bool equal = (ctx->crf[7] & 2u) != 0;
+        PickupTraceState* state = pickup_trace_find_rejected(true);
+        fprintf(stderr, "[pickup-trace] reinsert-branch-check region=%s thread=%016llX seq=%u site=%08X compare=%s equal=%d manager=%08X root=%08X returned_node=%08X lr=%08X\n",
+                region, static_cast<unsigned long long>(tid), state ? state->sequence : 0,
+                addr, addr == kPickupTraceRootCompare ? "manager-root" : "returned-node-null",
+                equal ? 1 : 0, manager, root, node, static_cast<uint32_t>(ctx->lr));
+        return;
+    }
+
+    if (addr == kPickupTraceReinsertReturn) {
+        PickupTraceState* state = pickup_trace_find_rejected(true);
+        fprintf(stderr, "[pickup-trace] reinsert-helper-return region=%s thread=%016llX seq=%u lr=%08X result=%08X manager=%08X node=%08X\n",
+                region, static_cast<unsigned long long>(tid), state ? state->sequence : 0,
+                static_cast<uint32_t>(ctx->lr), gpr32(ctx, 3), gpr32(ctx, 27), gpr32(ctx, 31));
+        return;
+    }
+
+    if (addr == kPickupTraceLocalLookup || addr == kPickupTraceEventLookup) {
+        const bool event = addr == kPickupTraceEventLookup;
+        const uint32_t manager = gpr32(ctx, 3), manager_alt = event ? 0 : gpr32(ctx, 31);
+        const uint32_t key = gpr32(ctx, 4), node = event ? gpr32(ctx, 9) : gpr32(ctx, 11);
+        uint32_t node_key = 0, position[4]{}, fields[4]{};
+        const bool readable = pickup_trace_read_node(node, node_key, position, fields);
+        const bool node_key_matches = readable && node_key == key;
+        PickupTraceState* state = pickup_trace_find_lookup(manager, key, position, fields);
+        if (!event && manager_alt != manager && !state)
+            state = pickup_trace_find_lookup(manager_alt, key, position, fields);
+        const bool same_node = state && state->node == node;
+        fprintf(stderr, "[pickup-trace] lookup-candidate region=%s thread=%016llX seq=%u path=%s site=%08X manager_r3=%08X manager_r31=%08X key=%08X node=%08X node_key=%08X node_key_matches=%d identity_match=%d same_node_pointer=%d readable=%d pos=%08X,%08X,%08X,%08X fields=%08X,%08X,%08X,%08X\n",
+                region, static_cast<unsigned long long>(tid), state ? state->sequence : 0,
+                event ? "event" : "local", addr, manager, manager_alt, key, node, node_key,
+                node_key_matches ? 1 : 0, state ? 1 : 0, same_node ? 1 : 0, readable ? 1 : 0,
+                position[0], position[1], position[2], position[3], fields[0], fields[1], fields[2], fields[3]);
+    }
+}
+
 } // namespace
 
 /* Every dev hook site (insn_hooks.txt) comes here; the switch picks the site. */
 extern "C" void des_dev_hook(ppu_context* ctx, uint32_t addr)
 {
+    if (pickup_trace_site(addr)) {
+        if (env_on("DES_PICKUP_TRACE")) {
+            pickup_trace_hook(ctx, addr);
+        } else {
+            for (PickupTraceState& pending : s_pickup_trace) pending.active = false;
+        }
+        return;
+    }
     static int god = 0, devlog = 0;
     static float atk = 1.0f, speed = 1.0f;
     PS3_KNOB(god, god_knob());
