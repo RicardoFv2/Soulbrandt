@@ -51,16 +51,26 @@ deposit record shows inventory `17→16`, Storage `93→94`, and load `87.8→87
 Synthetic `storage_check` passed 59 checks and `storage_navigation_check`
 passed 92 checks.
 
-These results cover exact successful operations and simulated refusal/mismatch
-handling. They do not prove rollback after a partial native box write. The
-Storage wrapper detects a mismatched delta and disables later Send operations,
-but does not restore the box or inventory. The native helper can clamp a
-Storage stack while reporting success and remove the full requested amount.
-The lift skips inventory removal on a `-1` result, but that alone does not
-prove the box stayed unchanged on every failure path. Therefore this change is
-observer-only; it does not add pickup-to-Storage transfer behavior. That work
-still needs native partial/full/refusal and rollback evidence before it can
-claim transaction safety.
+The checked-in `storage_check` harness gives a concrete counterexample to
+rollback in the current wrapper. Its native-call stand-in (`native_deposit`,
+lines 47-54 of `port/tests/storage_check.cpp`) is configured for amount 1,
+`deposit_result=1`, `inventory_delta=1`, and `box_delta=0`. Starting from
+inventory count 63 and Storage count 48, it leaves inventory 62 and Storage
+48. The production wrapper detects `inventory_delta=1, box_delta=0`, sets the
+session fail-safe, and returns without restoring either side; the assertions
+at lines 327-330 verify those post-call values. Running
+`.local/task3-build-pinned-asia/storage_check.exe` reproduced the diagnostic
+and passed all 106 checks. This is direct evidence that the wrapper does not
+roll back a partial outcome supplied by its native-call boundary.
+
+That harness is intentionally synthetic: it proves the wrapper's behavior
+under a partial native outcome, not that the game's native helper reaches that
+outcome. The lift's `0x00924BB8` caller skips inventory subtraction when
+`0x009248A0` returns `-1`, but that ordering alone does not prove that the box
+is unchanged on every insertion failure path. Actual rollback inside the game
+remains unproven; the wrapper currently disables later Send calls but does not
+restore the box or inventory. Therefore this change remains observer-only and
+does not add pickup-to-Storage transfer behavior or claim transaction safety.
 
 ## Verification
 
